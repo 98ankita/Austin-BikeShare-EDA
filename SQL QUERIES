@@ -1,0 +1,205 @@
+SELECT * FROM `bigquery-public-data.austin_bikeshare.bikeshare_stations` LIMIT 10
+
+#EDA
+
+#Q1
+#Frequency of rides by hour
+
+SELECT 
+    EXTRACT(HOUR FROM TIMESTAMP(start_time)) as start_hour,
+    COUNT(*) as num_rides
+FROM `bigquery-public-data.austin_bikeshare.bikeshare_trips`
+group by start_hour
+order by start_hour
+
+
+#Q2
+#number of stations in different property types
+
+SELECT COUNT(station_id) AS station_count, 
+       IFNULL(property_type, 'Unknown') AS property_type
+FROM `bigquery-public-data.austin_bikeshare.bikeshare_stations` 
+WHERE property_type IS NOT NULL AND TRIM(property_type) <> ''
+GROUP BY property_type;
+
+#Q3
+#Time spent by different kinds of subscribers
+
+select subscriber_type, COUNT(trip_id) AS number_of_trips, round(sum(duration_minutes),2) as total_mins_spent, round(avg(duration_minutes),2) as avg_minutes_spent
+FROM `bigquery-public-data.austin_bikeshare.bikeshare_trips`
+group by subscriber_type
+order by sum(duration_minutes) desc
+
+#Q4
+#number of stations in different property types
+
+SELECT COUNT(station_id) AS station_count, 
+       IFNULL(property_type, 'Unknown') AS property_type
+FROM `bigquery-public-data.austin_bikeshare.bikeshare_stations` 
+WHERE property_type IS NOT NULL AND TRIM(property_type) <> ''
+GROUP BY property_type;
+
+#Q5
+#Analyzing the count of round trips for each day of the week in April 2023 
+
+SELECT
+  CASE EXTRACT(DAYOFWEEK FROM DATE(TIMESTAMP(start_time)))
+    WHEN 1 THEN 'Sunday'
+    WHEN 2 THEN 'Monday'
+    WHEN 3 THEN 'Tuesday'
+    WHEN 4 THEN 'Wednesday'
+    WHEN 5 THEN 'Thursday'
+    WHEN 6 THEN 'Friday'
+    WHEN 7 THEN 'Saturday'
+  END AS day_of_week,
+  COUNT(trip_id) AS round_trip_count
+FROM
+  `bigquery-public-data.austin_bikeshare.bikeshare_trips`
+WHERE
+  SAFE_CAST(end_station_id AS INT64) = start_station_id
+  AND SAFE_CAST(end_station_id AS INT64) IS NOT NULL
+  AND DATE(TIMESTAMP(start_time)) BETWEEN DATE '2023-04-01' AND DATE '2023-04-30'
+GROUP BY
+  day_of_week
+ORDER BY
+  MIN(EXTRACT(DAYOFWEEK FROM DATE(TIMESTAMP(start_time))));
+
+
+#Q6
+#What is the utilization rate of each bike type, calculated as the percentage of time each bike type is in use compared to the total available time?
+
+WITH BikeUtilization AS (
+  SELECT
+    bike_type,
+    COUNT(DISTINCT bike_id) AS total_bikes,
+    COUNT(trip_id) AS total_trips,
+    AVG(duration_minutes) AS avg_time_spent,
+    SUM(duration_minutes) AS total_time_spent
+  FROM `bigquery-public-data.austin_bikeshare.bikeshare_trips`
+  GROUP BY bike_type
+)
+
+SELECT
+  bu.bike_type,
+  bu.total_bikes,
+  bu.total_trips,
+  ROUND(bu.avg_time_spent) AS avg_time_spent,
+  ROUND((bu.total_time_spent / t.total_time) * 100, 2) AS utilization_rate
+FROM BikeUtilization bu
+CROSS JOIN (SELECT SUM(duration_minutes) AS total_time FROM `bigquery-public-data.austin_bikeshare.bikeshare_trips`) t;
+
+
+#Q7
+#trips and avg time spent based on the day of the week
+
+SELECT
+  FORMAT_DATE('%A', DATE(TIMESTAMP(start_time))) AS day_of_week,
+  COUNT(trip_id) AS number_of_trips,
+  round(AVG(duration_minutes)) AS total_time_spent
+FROM
+  `bigquery-public-data.austin_bikeshare.bikeshare_trips`
+GROUP BY
+  day_of_week
+ORDER BY
+  day_of_week;
+
+
+----------
+CASE STUDY BASED ANALYSIS
+
+#Case Study 1 - Possible Faulty Bikes
+#Are there bikes which havent been used for more than 5 mins since 23rd of April 2023 for over 25 instances
+#this will help us understand if there is a bike that potentially needs repair or serice or if there is anything wrong with it
+
+WITH BikeUsageAfterApril23 AS (
+  SELECT
+    bike_id,
+    start_time,
+    duration_minutes
+  FROM `bigquery-public-data.austin_bikeshare.bikeshare_trips`
+  WHERE
+    start_time >= TIMESTAMP('2023-04-23')
+),
+LowDuartionRideUsage AS (
+  SELECT
+    bike_id,
+    start_time,
+    duration_minutes
+  FROM
+    BikeUsageAfterApril23
+  GROUP BY
+    bike_id, start_time, duration_minutes
+  HAVING MAX(duration_minutes) < 5
+)
+
+SELECT
+  bike_id,
+  COUNT(bike_id) AS number_of_instances
+FROM
+  LowDuartionRideUsage
+GROUP BY
+  bike_id
+having COUNT(bike_id)>25
+order by COUNT(bike_id) desc;
+
+
+------------------
+
+#case study 2  - Question: What is the average utilization of bike station capacity, and are there stations consistently running out of docks or having excess capacity?
+#gives us data on which stations could use more docks for docking and more availability of bikes
+#this well helps the business to understand how to make customers feel more satisfied with the service and also increase revenue at the same time
+
+WITH StationUtilization AS (
+  SELECT
+    start_station_id,
+    COUNT(trip_id) AS total_trips,
+    AVG(duration_minutes) AS avg_trip_duration,
+    AVG(number_of_docks) AS avg_station_capacity,
+    COUNT(DISTINCT bike_id) AS unique_bikes
+  FROM `bigquery-public-data.austin_bikeshare.bikeshare_trips` t
+  JOIN `bigquery-public-data.austin_bikeshare.bikeshare_stations` s
+    ON t.start_station_id = s.station_id
+    where s.status = 'active'
+  GROUP BY start_station_id
+)
+
+SELECT
+  su.start_station_id,
+  su.total_trips,
+  round(su.avg_trip_duration) as avg_trip_duration,
+  su.avg_station_capacity,
+FROM StationUtilization su
+ORDER BY su.total_trips DESC;
+
+
+--------------------
+#Case Study 3 - What is the rank of each station based on the total number of trips started, and what percentage of the total trips does each station represent? 
+#Additionally, can you identify the top 15 active stations and the bottom 15 stations that are closed or should be considered closing, based on their usage percentage?
+
+
+WITH StationStats AS (
+  SELECT
+    start_station_id,
+    COUNT(trip_id) AS total_trips,
+    RANK() OVER (ORDER BY COUNT(trip_id) DESC) AS station_rank,
+    ROUND((COUNT(trip_id) / SUM(COUNT(trip_id)) OVER ()) * 100, 2) AS percentage_of_total_trips
+  FROM `bigquery-public-data.austin_bikeshare.bikeshare_trips`
+  GROUP BY start_station_id
+)
+, Top15 as(
+SELECT
+  start_station_id,
+  total_trips,
+  station_rank,
+  percentage_of_total_trips
+FROM StationStats
+WHERE station_rank <= 15 OR station_rank > (SELECT COUNT(DISTINCT start_station_id) FROM StationStats) - 15
+ORDER BY station_rank ASC)
+
+SELECT T.*, BS.status
+from Top15 T
+JOIN `bigquery-public-data.austin_bikeshare.bikeshare_stations` BS
+ON T.start_station_id=BS.station_id 
+ORDER BY T.station_rank asc
+
+
